@@ -1,10 +1,11 @@
-# TODO: Team name
+# Team 10
 
 ## Members
 
-- TODO: Name Surname
-- TODO: Name Surname
-- TODO: Name Surname
+- Olivia Espiñeira 
+- Iciar Adliño
+- Laura Gonzalez
+- Matteo Giorgetti
 - Lara Iglesias Pérez
 
 ## Algorithms implemented
