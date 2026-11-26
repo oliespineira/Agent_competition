@@ -318,7 +318,6 @@ class SearchState:
 
     def __init__(self):
         self.table = {}          # transposition table: position hash -> (depth, value, flag, best move)
-        self.seen = set()        # hashes of positions already in the game or on the current search line
         self.nodes = 0           # positions visited (used to check the clock every 64 nodes)
         self.deadline = 0.0      # time.perf_counter() value at which we must stop
         self.partial = None      # (move, score) of the depth being searched, updated after each root move
@@ -338,6 +337,18 @@ def mate_score(board, ply):
     if board.turn == chess.WHITE:        # White is mated: very bad for MAX
         return -(MATE - ply)
     return MATE - ply                    # Black is mated: very good for MAX
+
+
+def rule_draw_score(board, ply):
+    """Return the score for rule-based draws, or None if play can continue."""
+    if board.halfmove_clock >= 100:
+        return mate_score(board, ply) if board.is_checkmate() else 0
+    if board.is_insufficient_material():
+        return 0
+    # Two returns to the same position need at least eight reversible plies.
+    if board.halfmove_clock >= 8 and board.is_repetition(3):
+        return 0
+    return None
 
 
 def order_moves(board, moves, first_move=None):
@@ -396,13 +407,19 @@ def quiescence(board, alpha, beta, ply):
     every legal move instead of only captures."""
 
     check_clock()
+    draw_score = rule_draw_score(board, ply)
+    if draw_score is not None:
+        return draw_score
+
+    legal_moves = board.legal_moves
+    in_check = board.is_check()
+    if not legal_moves:
+        return mate_score(board, ply) if in_check else 0
     maximizing = board.turn == chess.WHITE
 
-    if board.is_check():
+    if in_check:
         # In check you cannot "do nothing", so we must look at every way out of check.
-        moves = list(board.legal_moves)
-        if not moves:                                  # in check with no moves: checkmate
-            return mate_score(board, ply)
+        moves = legal_moves
         if ply > 60:                                   # safety limit on very long sequences
             return static_evaluation(board)
         best = -INFINITY if maximizing else INFINITY
@@ -421,7 +438,7 @@ def quiescence(board, alpha, beta, ply):
                 return stand_pat
             beta = min(beta, stand_pat)
         best = stand_pat
-        moves = [move for move in board.legal_moves
+        moves = [move for move in legal_moves
                  if (board.is_capture(move) or move.promotion == chess.QUEEN)
                  and not is_losing_capture(board, move)]
 
@@ -442,30 +459,22 @@ def quiescence(board, alpha, beta, ply):
 
 def search(board, depth, alpha, beta, ply):
     """Alpha-beta for the playing agent. Same MAX/MIN logic as alphabeta(), with the additions."""
-    check_clock()
-    key = position_key(board)
-
-    # 1. Draws by rule. A position that already appeared (in the game or on this search line)
-    #    is scored as a draw: repeating it gains nothing, and threefold repetition is a draw.
-    if key in state.seen:
-        return 0
-    if board.halfmove_clock >= 100 and not board.is_checkmate():      # fifty-move rule
-        return 0
-    if board.is_insufficient_material():                               # e.g. king against king
-        return 0
-
-    # 2. Depth cutoff reached: instead of evaluating immediately, settle the captures first.
     if depth <= 0:
         return quiescence(board, alpha, beta, ply)
+    check_clock()
+    draw_score = rule_draw_score(board, ply)
+    if draw_score is not None:
+        return draw_score
 
-    # 3. Transposition table: the same position can be reached by different move orders
-    #    (e.g. Nf3 then e4, or e4 then Nf3). If we already searched it deeply enough, reuse it.
+    # A pawn move or capture resets both the fifty-move clock and the relevant
+    # repetition history. On other positions, use the table only to order moves.
+    key = position_key(board)
+    cache_score = board.halfmove_clock == 0
     table_move = None
     entry = state.table.get(key)
     if entry is not None:
         stored_depth, stored_value, flag, table_move = entry
-        # Near the fifty-move limit the same position can have a different future, so don't trust it.
-        if stored_depth >= depth and board.halfmove_clock < 90:
+        if cache_score and stored_depth >= depth:
             if flag == EXACT:
                 return stored_value
             if flag == LOWER_BOUND and stored_value >= beta:   # true value >= stored >= beta: cut-off
@@ -473,43 +482,37 @@ def search(board, depth, alpha, beta, ply):
             if flag == UPPER_BOUND and stored_value <= alpha:  # true value <= stored <= alpha: cut-off
                 return stored_value
 
-    # 4. Terminal test: no legal moves means checkmate or stalemate.
     moves = list(board.legal_moves)
     if not moves:
         return mate_score(board, ply) if board.is_check() else 0
 
-    # 5. Ordinary alpha-beta over the ordered moves (same as alphabeta() in Part 2).
+    # Ordinary alpha-beta over the ordered moves (same as alphabeta() in Part 2).
     maximizing = board.turn == chess.WHITE
     original_alpha, original_beta = alpha, beta          # needed to label the result for the table
     best = -INFINITY if maximizing else INFINITY
     best_move = None
-    state.seen.add(key)                                  # this position is now on the current line
-    try:
-        for move in order_moves(board, moves, table_move):
-            board.push(move)
-            score = search(board, depth - 1, alpha, beta, ply + 1)
-            board.pop()
-            if maximizing and score > best:
-                best, best_move = score, move
-                alpha = max(alpha, best)
-            elif not maximizing and score < best:
-                best, best_move = score, move
-                beta = min(beta, best)
-            if alpha >= beta:                            # prune the remaining moves
-                break
-    finally:
-        state.seen.discard(key)                          # leaving this position: remove it from the line
+    for move in order_moves(board, moves, table_move):
+        board.push(move)
+        score = search(board, depth - 1, alpha, beta, ply + 1)
+        board.pop()
+        if maximizing and score > best:
+            best, best_move = score, move
+            alpha = max(alpha, best)
+        elif not maximizing and score < best:
+            best, best_move = score, move
+            beta = min(beta, best)
+        if alpha >= beta:                            # prune the remaining moves
+            break
 
-    # 6. Store the result. If we stopped early (cut-off) the score is only a bound, not exact.
+    # Store the result. If we stopped early (cut-off) the score is only a bound.
     if best <= original_alpha:
         flag = UPPER_BOUND                               # every move was <= alpha: true value <= best
     elif best >= original_beta:
         flag = LOWER_BOUND                               # cut-off: true value >= best
     else:
         flag = EXACT
-    # Mate scores depend on the distance to the root, and draw scores of 0 may come from a
-    # repetition that depends on the path we took. We keep only the move for those (depth -1).
-    stored_depth = depth if (best != 0 and abs(best) < MATE_THRESHOLD) else -1
+    # Mate scores depend on the distance to the root, so keep only the move.
+    stored_depth = depth if cache_score and abs(best) < MATE_THRESHOLD else -1
     if len(state.table) > 300000:                        # keep memory far below the 2 GB limit
         state.table.clear()
     state.table[key] = (stored_depth, best, flag, best_move)
@@ -544,22 +547,30 @@ PANIC_S = 0.25         # below this, answer instantly without searching (safety 
 
 
 def rebuild_board(observation):
-    """A FEN has no history, so we replay all moves from the start (handbook advice).
-    Also returns the hashes of the positions that could still repeat."""
+    """Replay the game so python-chess can check repetition during search."""
+    current = chess.Board(observation["fen"])
     board = chess.Board()
-    seen = [position_key(board)]
     try:
         for uci in observation["history"]:
             board.push_uci(uci)
-            if board.halfmove_clock == 0:      # a capture or pawn move: older positions can never come back
-                seen = []
-            seen.append(position_key(board))
-        if board.fen() == observation["fen"]:  # sanity check: the replay matches the judge's position
-            return board, set(seen)
+        if board == current:
+            return board
     except ValueError:                         # a history we cannot replay: fall back to the FEN
         pass
-    board = chess.Board(observation["fen"])
-    return board, {position_key(board)}
+    return current
+
+
+def fallback_move(board, moves):
+    """Use move ordering, but avoid an immediate stalemate when ahead."""
+    for move in moves:
+        board.push(move)
+        stalemate = board.is_stalemate()
+        board.pop()
+        if not stalemate:
+            return move
+        if move == moves[0] and static_evaluation(board) * (1 if board.turn == chess.WHITE else -1) <= 0:
+            break
+    return moves[0]
 
 
 def time_budget(remaining, ply):
@@ -573,13 +584,12 @@ def time_budget(remaining, ply):
 
 def choose_move(observation):
     started = time.perf_counter()
-    board, seen = rebuild_board(observation)
-    state.seen = seen
+    board = rebuild_board(observation)
     target, hard_limit = time_budget(observation["time_remaining_s"], observation["ply"])
     state.deadline = started + hard_limit
 
     moves = order_moves(board, list(board.legal_moves))
-    best_move = moves[0]                       # always have an answer, even if depth 1 is not finished
+    best_move = fallback_move(board, moves)    # always have an answer, even if depth 1 is not finished
     depth_done, score = 0, 0
     # Iterative deepening: search depth 1, then 2, then 3 ... Each finished depth gives a usable
     # move, so when the time runs out we play the best move of the deepest COMPLETE search.
@@ -613,7 +623,7 @@ def act(observation):
         if observation["time_remaining_s"] < PANIC_S:
             board = chess.Board(observation["fen"])
             moves = order_moves(board, list(board.legal_moves))
-            return {"move": moves[0].uci()}    # almost no time: best-looking capture, no search
+            return {"move": fallback_move(board, moves).uci()}
         return {"move": choose_move(observation)}
     except Exception as error:                 # a bug must never lose the game: play a legal move
         print("ERROR, fallback move used:", repr(error))
