@@ -1,0 +1,19 @@
+# Python cache files, created automatically when code runs
+__pycache__/
+*.pyc
+
+# Catan training checkpoint: large and regenerable (the final table is already inside catan_agent.py)
+q_checkpoint.json
+q_checkpoint.json.tmp
+
+# The course judge and its data: the professor's material, not ours
+ai_agent_tournament/
+ai_agent_tournament.zip
+Tournament.ipynb
+
+# Match records saved by run_match, and any debug output
+results/
+debug*.json
+
+# The zip we build for Blackboard (built from the folder, never edited by hand)
+Team_*.zip

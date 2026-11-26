@@ -236,3 +236,162 @@ Road Trip: we used Claude (Anthropic) to help design, implement and benchmark th
 Battleship: We used Claude (Anthropic) as a coding assistant for the Battleship agent. It helped design the belief-state filter, the CSP target mode and the Bayesian sonar update, write and debug the code, and run the comparison between versions. Every algorithm is based on material from the course sessions, and we reviewed and tested all of it ourselves in Colab with the official judge. We understand and can explain every part of the agent.
 
 TODO: the other two agents.
+## Catan
+
+### Problem formulation
+Two players, first to 7 victory points (VP). Dice and development cards are random, the rival's cards are hidden, and each agent has 5 s of decision time per game. The agent sees the board, its own cards, public information and the log, and it returns the id of one legal action. Goal: win.
+
+The file has three policies:
+
+| Policy | Function | What it is |
+|---|---|---|
+| Baseline | `heuristic_policy` | Fixed priority list. No search, no learned values. |
+| Reinforcement learning | `q_policy` | Q-table learned offline. |
+| Search (the one that plays) | `act` | Searches the actions of the turn and scores positions with a hand-written formula. |
+
+`act` does **not** use the Q-table, because the learned policy is measurably much weaker (see the comparison).
+
+### Markov decision process and reinforcement learning
+A Markov decision process (MDP) is a model with states, actions, transitions and rewards. Ours is deliberately simplified.
+
+**State** (`state_features`), 9 values:
+
+| Value | Meaning |
+|---|---|
+| phase | Part of the game or turn given by the judge |
+| stage | My points: 0 (up to 2), 1 (3 or 4), 2 (5 or more) |
+| race | Visible points: ahead (1), level (0), behind (-1) |
+| can road, can settlement, can city, can dev card | 1 if my cards pay for it, else 0 |
+| open spot | 1 if I have a place to build a settlement now |
+| big hand | 1 if I hold more than 7 cards |
+
+**Action:** the action **type** (build road, bank trade, end turn and so on). Action ids change every turn, so they cannot be learned. A simple rule (`best_of_type`) then picks which road, trade or corner.
+
+**Transitions:** not modeled. Q-learning learns from played games without a model of the dice or the rival.
+
+**Reward:** VP gained (or lost) since my previous decision, plus 1 for winning or -1 for losing at the end. The VP term gives feedback during the game; the final term makes winning matter.
+
+**Update rule** (`q_update`):
+
+`Q_new = Q + alpha * (r + gamma * best_next - Q)`
+
+- `Q`: current value of (state, action type), in discounted reward points.
+- `r`: reward received since that action, in points.
+- `best_next`: highest value among the action types available at my next decision (0 when the game ends), in points.
+- `alpha`: learning rate, no unit; `max(0.02, n^-0.6)`, where `n` is the number of updates of that entry.
+- `gamma`: discount, no unit, 0.99.
+
+Worked example (illustrative numbers): `Q = 3.30`, `r = 1`, `best_next = 3.10`, `alpha = 0.02`, `gamma = 0.99`. Target = 1 + 0.99 * 3.10 = 4.069. `Q_new` = 3.30 + 0.02 * (4.069 - 3.30) = 3.315.
+
+**Policy:** `q_policy` takes the action type with the highest learned value. If the baseline's action type was never learned in that state, it plays the baseline's move.
+
+`action_value(observation, action_id)` returns the learned Q-value of the action's type (0 if never learned), plus 0.001 times a hand-written estimate to order actions of the same type. It is not a win probability.
+
+### How we trained
+- Opponent: `heuristic_policy`. The learner alternates seats.
+- Exploration (epsilon-greedy: with probability epsilon, try a random action type): epsilon falls from 0.40 to 0.05 over the first 40,000 games, then stays at 0.05.
+- 80,000 games in short batches with a saved checkpoint, about 20 minutes of computing on a 2-core Linux machine.
+- Entries updated fewer than 30 times are discarded. The exported table has 938 entries over 259 states and is stored in `catan_agent.py`.
+- Repeating a 2,000-game run, in one batch or two, gave an identical table.
+
+To reproduce (`ai_agent_tournament` is the extracted course folder; `q_checkpoint.json` must not exist at the start):
+
+```
+python train_q_catan.py train  --root ai_agent_tournament --games 20000   # repeat until the total is 80000
+python train_q_catan.py export --root ai_agent_tournament
+```
+
+### What we learned
+| Training games | Q-learning against baseline (2,000 games, same boards) |
+|---|---|
+| 40,000 | 46.7% ± 1.7 |
+| 80,000 | 50.4% ± 1.7 |
+
+We chose the 80,000-game table from this result, so we checked it on new boards: **51.3% ± 1.2** (4,000 games). That is at most a very small gain over the baseline.
+
+- The table does change behavior: in 500 test games it picked a different action type from the baseline in 2,988 of 11,807 decisions that offered a choice (25%). Most common: trading or building a road instead of ending the turn, and ending the turn instead of trading or playing Monopoly.
+- Those changes barely affect the win rate.
+- Our explanation (not proven): the state is too coarse, so positions needing different moves look the same; only the action type is learned; and dice noise is large compared with the difference between actions.
+- More training helped from 40,000 to 80,000 games. We did not test beyond that.
+
+### The search agent
+**Value of a position** (`score`):
+
+`V = sum_k(w_k * mine_k) - 0.55 * sum_k(w_k * rival_k) + 1.6 * (A_mine - 0.55 * A_rival)`
+
+- `V`: score of the position, no unit.
+- `k`: feature number, 34 features per player (listed in `FEATURES`): points, production per resource, expected turns until each purchase is affordable, reachable building spots, knights, ports and others.
+- `mine_k`, `rival_k`: feature `k` for me and for the rival (counts, production, or 0 to 1 values, depending on the feature).
+- `w_k`: hand-set weight of feature `k`, in score points per unit of the feature.
+- `0.55`: how much the rival's position counts compared with mine (no unit).
+- `1.6`: weight of progress toward Largest Army (score points).
+- `A_mine`, `A_rival`: `(min(c, n) / n)^2`, no unit, where `c` is knights played plus held and `n` is knights needed to take Largest Army; 0 for its holder.
+
+**Search** (`plan`): a beam search over my own turn. It keeps the 6 best partial sequences, up to 5 actions deep, and plays the first action of the best one. A drawn card is averaged over the cards not yet seen. Dice and the rival's reply are not searched.
+
+### Planning: preconditions and effects
+| Action | Preconditions | Effects |
+|---|---|---|
+| Road | 1 wood, 1 brick (or free); fewer than 15; empty edge connected to my network | Road added; Longest Road rechecked |
+| Settlement | 1 wood, 1 brick, 1 sheep, 1 wheat; fewer than 5; on my road; no building here or next door | +1 VP; may cut the rival's road |
+| City | 2 wheat, 3 ore; my settlement; fewer than 4 cities | +1 VP; that corner produces double |
+| Development card | 1 sheep, 1 wheat, 1 ore; deck not empty | Unknown card (averaged) |
+| Knight | Card held; no other card played this turn | Move robber; may take Largest Army |
+| Year of Plenty / Monopoly | Same | 2 bank cards / all rival cards of one resource |
+| Road Building | Same, and able to pay for a road (engine rule) | 2 free roads |
+| Bank trade | 4, 3 or 2 equal cards, depending on ports | 1 card of another resource |
+
+`next_actions` checks the preconditions and `apply_action` applies the effects.
+
+### What can be deduced from public events
+- Payouts, building costs, trades, Year of Plenty, Monopoly and cards stolen between the two players are all known to me.
+- So the rival's hand is exact until some of its cards are discarded at random. After that it is an estimate, rescaled to the public card count. The bank running out of a resource is not modeled.
+- Unseen development cards = deck composition minus my cards and all played cards.
+
+### Baseline against improved versions
+Each board is played twice with seats swapped. Boards differ from those used in training. ± is the half-width of the 95% confidence interval.
+
+| Match | Games | Win rate of the first |
+|---|---|---|
+| Q-learning vs baseline | 4,000 | 51.3% ± 1.2 |
+| Search vs baseline | 1,000 | **71.0% ± 2.8** |
+| Search vs Q-learning | 1,000 | **71.9% ± 2.9** |
+| Q-learning vs random moves | 1,000 | 100% |
+| Baseline vs random moves | 1,000 | 99.7% ± 0.3 |
+
+```
+python train_q_catan.py evaluate --root ai_agent_tournament --games 4000 --seed0 900000 --pair qlearning baseline
+python train_q_catan.py evaluate --root ai_agent_tournament --games 1000 --pair search baseline
+python train_q_catan.py evaluate --root ai_agent_tournament --games 1000 --pair search qlearning
+python train_q_catan.py evaluate --root ai_agent_tournament --games 1000 --pair qlearning random
+python train_q_catan.py evaluate --root ai_agent_tournament --games 1000 --pair baseline random
+```
+
+**Course judge** (`run_game`, real clocks, match seeds 3000 onward): 52 wins in 60 games against `demo`, 20 in 20 against `demo_b`, no incidents. `check_requirements`: 4 of 4 Catan checks pass.
+
+### How the search weights were chosen
+The weights were set by hand, **not learned**. Changes were kept only if they won matches. These development matches used scripts and earlier versions that are not part of this submission, so the course folder alone cannot reproduce them.
+
+| Change | Games | Win rate against previous best | Decision |
+|---|---|---|---|
+| Discount a hand above 7 cards by the risk of a 7 | 2,000 | 52.7% ± 1.5 | Kept |
+| Same, plus a heavier penalty per card | 1,000 | 49.2% ± 2.4 | Rejected |
+| Largest Army progress, weight 1.6 | 1,000 | 54.1% ± 2.1 | Kept |
+| Same, weight 0.7 | 1,000 | 53.6% ± 1.8 | Not chosen (no clear difference from 1.6) |
+| Three changes to the opening placement | 1,000 to 2,000 | 48.7% to 49.2% | Rejected |
+
+### Time and memory
+The search uses about 0.1 s of computation per game; in the judge games above at least 4.73 s of the 5 s remained. Below 0.8 s remaining, or after an internal error, `act` falls back to the baseline. Peak memory of a test process running the agent: about 36 MB.
+
+### Limits
+- No search over dice or the rival's reply.
+- A knight is not considered in the middle of a planned turn, and there is no dedicated search for a winning sequence.
+- Weights are hand-set, and no strong independent opponent was available.
+- Q-learning is far weaker than the search. Next steps would be learning from numeric features (function approximation) instead of a small table, and training against stronger opponents.
+- One engine behavior: cutting a rival's road can award Longest Road with fewer than 5 roads. The agent avoids giving those points away and does not try to obtain them.
+
+### Dependencies
+The agent uses only the Python standard library. The training script also needs the course folder (and its `catanatron` package). Tested on Linux with Python 3.13, not on Google Colab.
+
+### Use of generative AI
+Claude (Anthropic) designed, wrote, trained, tested and documented this agent and the training script, following the team's instructions. Before submitting, the team must describe here what it reviewed or changed itself, confirm that this complies with the course AI policy, and be able to explain every algorithm.
