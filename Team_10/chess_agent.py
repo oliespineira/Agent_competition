@@ -1,11 +1,11 @@
 """Chess agent for the AI Agent Tournament (AI: Reasoning & Problem Solving, IE University).
 
 Map of this file to the course:
-  PART 1  Evaluation function E(s) = sum of weighted features ......... Session 15
-  PART 2  Required functions: evaluate, minimax, alphabeta ............ Sessions 14 and 15
+  PART 1  Evaluation function E(s) = sum of weighted features --> Session 15
+  PART 2  Required functions: evaluate, minimax, alphabeta --> Sessions 14 and 15
   PART 3  Playing search: alpha-beta with depth cutoff, move ordering,
-          iterative deepening, transposition table, quiescence ........ Session 14 + handbook extensions
-  PART 4  act(): clock management and the decision ..................... Session 2 (agent), handbook
+          iterative deepening, transposition table, quiescence --> Session 14 + handbook extensions
+  PART 4  act(): clock management and the decision --> Session 2 (agent), handbook
 
 Convention used EVERYWHERE in this file: scores are from WHITE's point of view.
 White is MAX (wants high scores), Black is MIN (wants low scores), exactly like the
@@ -36,11 +36,21 @@ PIECE_VALUE = {
     chess.KING: 0,          # the king is never captured, so it has no material value
 }
 
-# Feature 2: POSITION (piece-square tables). A bonus or penalty for each piece on each square.
-# This is the "CONTROL" and "KING SAFETY" features of Session 15, measured cheaply:
-# knights in the centre are good, a king hiding behind pawns is good in the middlegame, etc.
-# Values: T. Michniewski, "Simplified Evaluation Function" (Chess Programming Wiki).
-# Each table is written as White sees the board: first row = rank 8, last row = rank 1.
+# Feature 2: POSITION (piece-square tables).
+# These tables implement the "CONTROL" and "KING SAFETY" features from Session 15.
+# A piece is not worth the same on every square: a knight in the centre attacks up to
+# 8 squares, while in a corner it attacks only 2. So each piece type gets an 8x8 table
+# that adds a bonus (or a penalty) depending on where the piece stands:
+#   - CONTROL: knights, bishops and pawns score higher in the centre.
+#   - KING SAFETY: in the middlegame the king scores higher when it has castled and
+#     stays behind its pawns.
+# Instead of counting attacked squares or checking the pawn shield on every evaluation,
+# we just look up one number per piece, which is much cheaper.
+# The values come from T. Michniewski's "Simplified Evaluation Function" (Chess
+# Programming Wiki); we did not tune them ourselves.
+# Tables are written from White's point of view, as you see the board from White's side:
+# the first row is rank 8 and the last row is rank 1. For Black, table_bonus() flips the
+# table vertically, so the same table works for both colours.
 PAWN_TABLE = [
     [  0,   0,   0,   0,   0,   0,   0,   0],
     [ 50,  50,  50,  50,  50,  50,  50,  50],   # about to promote: big bonus
@@ -117,6 +127,7 @@ TABLE_FOR = {
     chess.BISHOP: BISHOP_TABLE,
     chess.ROOK: ROOK_TABLE,
     chess.QUEEN: QUEEN_TABLE,
+    chess.KING: KING_MIDDLEGAME_TABLE  # Default to middlegame table
 }
 
 # Feature weights w_i (Session 15: "these weights are modelling choices").
@@ -136,10 +147,18 @@ def table_bonus(table, square, color):
 
 
 def build_scores(king_table):
-    """Precompute, ONCE when the file loads, the score of every (colour, piece, square):
-    w1 * material + w2 * position bonus, with + for White and - for Black.
-    Same numbers as computing them during the game, but the search then only does lookups,
-    which makes the evaluation about twice as fast and lets the search go deeper."""
+    """Precompute the value of every piece on every square, once, when the file loads.
+
+    For each colour, piece type and square we store
+        w1 * material + w2 * position bonus,
+    positive for White and negative for Black, so a position's score is simply the sum
+    of the values of the pieces on the board.
+    The numbers are exactly the ones we would compute during the game. The difference is
+    that the search only has to look them up instead of recalculating them at every node.
+    That makes the evaluation about twice as fast, so the search can go deeper in the
+    same time.
+    `king_table` is the only table that changes between the middlegame and endgame
+    versions."""
     scores = {}
     for color in (chess.WHITE, chess.BLACK):
         sign = 1 if color == chess.WHITE else -1               # White adds, Black subtracts
@@ -169,8 +188,16 @@ def is_endgame(board):
 
 
 def static_evaluation(board):
-    """E(s) = w1 * material + w2 * position, for a position that is NOT finished.
-    White's point of view: positive is good for White."""
+    """Estimate how good an unfinished position is, E(s) from Session 15.
+
+    E(s) = w1 * material + w2 * position. Since build_scores() already combined both
+    terms for every piece on every square, here we just add up the precomputed value of
+    each piece on the board. White's pieces add and Black's subtract.
+    The score is always from White's point of view: positive means White is better,
+    negative means Black is better.
+    We first check whether the game is in the endgame, because the king should hide in
+    the middlegame but become active in the endgame, and use the matching set of scores.
+    Finished games (checkmate, draws) are handled by evaluate(), not here."""
     scores = ENDGAME_SCORES if is_endgame(board) else MIDDLEGAME_SCORES
     total = 0
     for color in (chess.WHITE, chess.BLACK):
@@ -184,9 +211,11 @@ def static_evaluation(board):
 
 
 def game_is_over(board):
-    """Terminal test under the tournament rules. Checkmate, stalemate and insufficient material
-    come from python-chess. Fifty moves (100 half-moves) is automatic in the tournament, so we
-    check it ourselves instead of waiting for a player to claim it."""
+    """Terminal test under the tournament rules: python-chess already detects checkmate,
+    stalemate and insufficient material. The fifty-move rule needs extra care: in normal
+    chess a player has to claim the draw, so python-chess does not end the game by itself.
+    In the tournament the draw is  automatic after fifty moves with no capture and no pawn 
+    move (100 half-moves), so we check that counter ourselves."""
     return board.is_game_over() or board.halfmove_clock >= 100
 
 
@@ -273,7 +302,12 @@ def alphabeta(fen, depth):
 # =====================================================================================
 
 class OutOfTime(Exception):
-    """Raised deep inside the search when the time for this move is used up."""
+    """Signal that the time for this move has run out: check_clock() raises it in 
+    the middle of the search, however deep the recursion is at that moment. That
+    way we jump straight back to choose_move() without returning through every 
+    level by hand. choose_move() catches it and plays the best move from the 
+    deepest search that finished, or the partial result of the current
+    depth when that is safe."""
 
 
 EXACT, LOWER_BOUND, UPPER_BOUND = 0, 1, 2        # what kind of score a table entry holds
@@ -331,9 +365,14 @@ def check_clock():
 
 
 def is_losing_capture(board, move):
-    """True for a capture like 'queen takes a defended pawn': the attacker is worth more than
-    the victim AND the enemy can recapture on that square. Such captures usually lose material,
-    so quiescence does not follow them (the main search still considers them)."""
+    """Spot captures that will most likely lose material, such as a queen taking a
+    defended pawn:  A capture counts as losing when the capturing piece is worth 
+    more than the piece it takes and the opponent can recapture on that square. 
+    Quiescence search skips these moves to save time, because following them 
+    rarely changes the result. The main search still looks at them, so a capture 
+    that really works is not missed. Promotions are never treated as losing: they 
+    are always worth a look."""
+   
     if move.promotion:                                           # promotions are always worth a look
         return False
     victim = board.piece_type_at(move.to_square) or chess.PAWN   # None only for en passant (a pawn)
@@ -343,11 +382,19 @@ def is_losing_capture(board, move):
 
 
 def quiescence(board, alpha, beta, ply):
-    """Search only captures (and queen promotions) until the position is quiet.
+    """Keep searching after the depth limit, but only captures and queen promotions,
+    until the position is calm: The problem it solves: if the search stops at a fixed 
+    depth, it can stop right in the middle of an exchange. Imagine the last move it 
+    looks at is "queen takes pawn". It sees a pawn won and is happy, but it never sees 
+    that next move the opponent takes the queen. Session 14 calls this the HORIZON 
+    EFFECT: what lies just beyond the search horizon is invisible. The fix is to look 
+    only at captures, which are few, until no more captures are worth making. Only 
+    then do we trust static_evaluation(). Each side is also allowed to "stand pat", 
+    that is, to stop capturing if capturing would make things worse. So the static 
+    score acts as a floor, and captures are only followed when they can improve on it.
+    When the side to move is in check it cannot just stand still, so we look at 
+    every legal move instead of only captures."""
 
-    Why: a fixed depth cutoff can stop in the middle of an exchange. If the search stops right
-    after QxP, it thinks it won a pawn and misses that the queen is recaptured next move.
-    This is the HORIZON EFFECT (the "search horizon" of Session 14)."""
     check_clock()
     maximizing = board.turn == chess.WHITE
 

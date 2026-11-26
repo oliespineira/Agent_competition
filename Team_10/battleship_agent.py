@@ -3,46 +3,58 @@
 Course sessions used are cited in brackets, e.g. [Session 17].
 
 Problem formulation [Sessions 2 and 3]
-----------------------------
-Partially observable, stochastic, sequential environment. The hidden state is where
-each enemy ship is. Our actions are: optionally move one of our ships, then shoot or
-use sonar. Observations are HIT / MISS / SUNK and noisy sonar counts. Goal: destroy
-all 17 enemy segments in as few turns as possible.
+--------------------------------------
+We play in a partially observable, stochastic, sequential environment. We never see the
+enemy ships: the hidden state is where each of them is. On each turn we can move one of
+our ships, then either shoot a cell or use sonar. What we observe is HIT / MISS / SUNK
+and, after a sonar scan, a noisy count of ship cells in a 3x3 square. The goal is to sink
+all 17 enemy segments before the rival sinks ours, so we want to do it in as few turns
+as possible.
 
 How it decides
 --------------
-* Belief state [Session 17]: as in Mini Battleship, the agent keeps the possible positions of
-  each enemy ship that is not sunk. Instead of a set it keeps a probability for each
-  possible position (top-left cell and orientation) [Session 23]. Every turn:
-    1. PREDICT [Session 17 "Hidden movement"]: the rival had one turn, so every belief goes
-       through the transition model of predict_ship_belief (same model, numpy
-       version for speed);
-    2. FILTER [Session 17 "Belief-state filtering"]: a MISS removes every position covering
-       that cell (it was empty at that moment); a HIT removes it for the ships that can
-       still move; a sonar reading is a Bayes update with sonar_posterior [Session 23].
-  How often the rival moves is unknown, so we keep three hypotheses (it never moves,
-  it moves 25% of turns, it always moves), one belief per hypothesis. Bayes' rule
-  [Session 23] updates P(hypothesis | shots so far): each shot result is evidence, the
-  likelihood is the probability that hypothesis gave to that result, and the scores
-  are normalised across hypotheses. The beliefs are then combined by those posterior
-  probabilities.
-* Hunt: shoot the cell most likely to contain a ship (the highest marginal [Session 23]).
-* Target (CSP [Sessions 8 and 9]): while some hits are not explained by sunk ships. Variables:
-  the enemy ships not sunk yet. Domains: their positions through a hit cell
-  (consistent_placements, with forward checking). Constraints: every hit covered
-  exactly once, no overlap, sunk cells excluded, and no cell that was missed AFTER
-  that ship's first hit (a hit ship cannot move, but before its first hit it could).
-  Backtracking enumerates every consistent assignment; we shoot the cell covered by
+* Belief state [Session 17]. The enemy ships can move, so remembering where we missed is
+  not enough: a cell that was empty three turns ago may hold a ship now. As in Mini
+  Battleship, the agent keeps track of where each enemy ship could be, but instead of a
+  set of positions it keeps a probability for each one (top-left cell and orientation)
+  [Session 23]. Every turn has two steps:
+    1. PREDICT [Session 17 "Hidden movement"]: the rival has had one turn, so each ship
+       may have moved one cell. predict_ship_belief spreads the probability to the
+       neighbouring positions (predict_np does the same with numpy, for speed).
+    2. FILTER [Session 17 "Belief-state filtering"]: then we use what we saw. A MISS
+       removes every position covering that cell, because it was empty at that moment.
+       A HIT does the same for the ships that can still move. A sonar reading is a
+       Bayes update with sonar_posterior [Session 23].
+  We do not know how often the rival moves, so we keep three hypotheses: it never moves,
+  it moves on 25% of its turns, or it moves every turn. Each one has its own belief.
+  After each shot, Bayes' rule [Session 23] checks how well each hypothesis predicted the
+  result and updates how much we trust it. The three beliefs are then combined using
+  those probabilities.
+* Hunt: when we have no unexplained hits, we shoot the cell most likely to contain a
+  ship (the highest marginal probability [Session 23]).
+* Target, as a CSP [Sessions 8 and 9]: once we have hits that do not belong to a sunk
+  ship, we work out which ship placements could explain them.
+    - Variables: the enemy ships not sunk yet.
+    - Domains: their possible positions through a hit cell (consistent_placements, with
+      forward checking).
+    - Constraints: every hit covered exactly once, no two ships overlapping, sunk cells
+      excluded, and no cell that was missed AFTER that ship's first hit. A hit ship can
+      no longer move, but before its first hit it could have been anywhere.
+  Backtracking lists every assignment that fits, and we shoot the cell that appears in
   the most of them.
-* Logical inference [Session 11]: which cells belong to each sunk ship is deduced with
-  certainty when only one assignment is consistent (attributions()), and the number
-  of hits still to explain is always known exactly.
-* Sonar, value of information [Session 17 "Why information matters"]: used only when no
-  single cell looks promising, so information is worth more than a shot.
-* Defence: move one undamaged ship every turn, so the rival's old misses stop being
-  true; prefer sideways moves of short ships and move away from our damaged ships.
-* Clock: work is incremental; below RESERVE_S seconds it falls back to a cheap rule.
-  Every answer is validated before it is returned.
+* Logical inference [Session 11]: some things are known for certain. The number of hits
+  still to explain is always total hits minus the lengths of the sunk ships. When only
+  one assignment fits, we also know exactly which cells belonged to each sunk ship
+  (attributions()).
+* Sonar, value of information [Session 17 "Why information matters"]: we only scan when
+  no single cell looks promising. At that point learning where the ships are is worth
+  more than a shot in the dark.
+* Defence: we move one undamaged ship every turn, so the rival's old misses are no
+  longer true. We prefer sideways moves of short ships and move away from our damaged
+  ships.
+* Clock: each turn only processes the new observations. If less than RESERVE_S seconds
+  are left, the agent switches to a cheap rule. Every answer is checked against the
+  judge's rules before it is returned.
 """
 import random
 
@@ -634,6 +646,15 @@ def _cheap_shot(observation):
 # Our own fleet
 # ---------------------------------------------------------------------------------
 def _designed_placement(observation):
+    """Place our fleet at random, but with no two ships touching, not even diagonally: 
+    Ships kept apart are harder to find. When the rival sinks one, its next shots around
+    that area do not land on a second ship. Each ship also has free water around it, so
+    it can move from the very first turn.
+    Each ship is placed in turn on a random free cell, and the cells around it (its
+    "halo") are reserved. If a ship has no room left, we start the whole layout again;
+    2000 attempts is far more than ever needed. If all of them fail, we return None and
+    the judge places the ships for us."""
+
     size = observation["board_size"]
     fleet = observation["fleet"]
     for _ in range(2000):
@@ -665,6 +686,18 @@ def _designed_placement(observation):
 
 
 def _choose_move(observation):
+    """Defence: pick which of our ships to move this turn, and where: Moving is free,
+       and the rival does not shoot again at cells where it missed. So a ship
+      that drifts into water the rival has already searched becomes very hard to find.
+      Each legal move gets a score, and we play the highest one:
+      - +3 for every cell that leaves the danger zone (our damaged ships and the cells
+        around them, which is where the rival will aim next), -2 for every cell that
+        stays in it.
+      - +1 for a sideways move: all of the ship's cells change, while a move along its
+        own axis keeps most of them in place.
+      - A small bonus for short ships, which are easier to hide.
+      - A random tie-breaker, so the rival cannot predict our moves.
+    Damaged ships cannot move, so legal_moves only contains undamaged ones."""
     moves = observation["legal_moves"]
     if not moves:
         return None
@@ -720,6 +753,15 @@ def _safe(answer, observation):
 # Entry point
 # ---------------------------------------------------------------------------------
 def act(observation):
+    """Entry point: the judge calls this every turn and we return our answer:
+    In the placement phase we reset the game state and place our ships.
+    After that, every turn goes through _decide(). Two safety measures protect us:
+      - If the judge asks again about the same situation (this can happen after the
+        rival fails), we give exactly the same answer as before.
+      - If anything goes wrong inside _decide(), we fall back to a simple shot instead
+        of crashing. Every answer is then checked by _safe(), so the judge never
+        receives an invalid one."""
+    
     if observation["phase"] == "placement":
         STATE.update(trackers=None, last_key=None, last_answer=None)
         if DESIGNED_PLACEMENT:
@@ -744,6 +786,19 @@ def act(observation):
 
 
 def _decide(observation):
+    """Choose this turn's action, in this order:
+
+    1. Defence: choose which of our ships to move (_choose_move).
+    2. If the clock is almost out, play a cheap shot and stop here.
+    3. Update the three beliefs (one per hypothesis about the rival) with the new
+       observations.
+    4. Target mode: if some hits are not explained by sunk ships, shoot the most likely
+       cell according to the CSP.
+    5. Otherwise hunt: find the most likely cell over the combined beliefs. If even that
+       cell is unlikely (below SONAR_THRESHOLD) and we still have sonar, scan instead
+       of shooting, because the information is worth more.
+    6. If nothing else works, use the cheap shot."""
+
     size = observation["board_size"]
     clock = observation.get("time_remaining_s")
     move = _choose_move(observation) if DEFENSIVE_MOVES else None
@@ -752,7 +807,7 @@ def _decide(observation):
 
     trackers = STATE["trackers"]
     if trackers is None:
-        lengths = [5, 4, 3, 3, 2]
+        lengths = [5, 4, 3, 3, 2] # standard fleet: carrier, battleship, cruiser, submarine, destroyer
         trackers = [Tracker(size, lengths, (observation["turn"] + 1) % 2, q) for q in MOVE_RATES]
         STATE["trackers"] = trackers
     for tracker in trackers:
