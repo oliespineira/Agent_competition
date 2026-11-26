@@ -631,8 +631,8 @@ class RoadTripSolver:
 
     def insertion(self, randomise=False):
         """Cheapest insertion on the REAL graph: keep a simple cycle and add one required city at
-        a time where it costs the fewest extra km, along paths avoiding the cycle. Returns an
-        order (local ids) or None."""
+        a time where it costs the fewest extra km, along paths avoiding the cycle. Submit the
+        constructed cycle before trying the decoder. Returns an order (local ids) or None."""
         k, D, R = self.k, self.D, self.req
         others = list(range(1, k))
         if randomise:
@@ -675,6 +675,13 @@ class RoadTripSolver:
             order.insert(i + 1, x)
             legs[i:i + 1] = [p1, p2]
             others.remove(x)
+        cycle = self.cycle_of(legs)
+        km = self._route_km(cycle)
+        if km is not None:
+            self._offer(cycle)
+            decoded_km, decoded_legs = self.decode(order)
+            if decoded_legs is None or km < decoded_km:
+                self.cache[tuple(order)] = (km, legs)
         return order
 
 

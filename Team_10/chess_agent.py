@@ -376,20 +376,14 @@ def check_clock():
 
 
 def is_losing_capture(board, move):
-    """Spot captures that will most likely lose material, such as a queen taking a
-    defended pawn:  A capture counts as losing when the capturing piece is worth 
-    more than the piece it takes and the opponent can recapture on that square. 
-    Quiescence search skips these moves to save time, because following them 
-    rarely changes the result. The main search still looks at them, so a capture 
-    that really works is not missed. Promotions are never treated as losing: they 
-    are always worth a look."""
-   
-    if move.promotion:                                           # promotions are always worth a look
+    """Prune expensive captures on attacked squares, except promotions and checks."""
+    if move.promotion:
         return False
     victim = board.piece_type_at(move.to_square) or chess.PAWN   # None only for en passant (a pawn)
     attacker = board.piece_type_at(move.from_square)
-    defended = board.is_attacked_by(not board.turn, move.to_square)   # can the opponent recapture there?
-    return PIECE_VALUE[attacker] > PIECE_VALUE[victim] and defended
+    return (PIECE_VALUE[attacker] > PIECE_VALUE[victim]
+            and board.is_attacked_by(not board.turn, move.to_square)
+            and not board.gives_check(move))
 
 
 def quiescence(board, alpha, beta, ply):
