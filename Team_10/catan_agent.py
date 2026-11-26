@@ -1,13 +1,49 @@
 """Catan Tournament 1v1 agent (first to 7 victory points).
 
+Course sessions used are cited in brackets, e.g. [Session 15].
+
+Problem formulation [Sessions 2 and 3]
+--------------------------------------
+Catan is partially observable (we cannot see the rival's cards), multiagent,
+stochastic (dice, development cards, the card stolen by the robber), sequential and
+discrete. Our agent is a utility-based agent [Session 2]: before acting, it simulates
+where each of its actions would lead and picks the one whose resulting position looks
+best.
+
 Two policies live in this file:
-  * act()      the policy that plays: it searches the actions of the current turn and scores the resulting positions
-               with a hand-written weighted sum.
-  * q_policy() the reinforcement-learning policy: a Q-table learned offline (train_q_catan.py). It is the learned
-               value required by the assignment; in our tests it is much weaker than act().
+  * act()      the policy that plays. It searches the actions of the current turn and
+               scores each resulting position with a hand-written weighted sum of
+               features [Session 15].
+  * q_policy() the reinforcement-learning policy [Session 20]: a Q-table learned
+               offline (train_q_catan.py). It is the learned value required by the
+               assignment; in our tests it is much weaker than act().
+
+How it decides
+--------------
+* State and transition model [Session 3]: State is a copy of the position that knows
+  just enough of the rules to simulate our own actions (build, buy, trade, play a
+  card). apply_action() plays the role of RESULT(s, a).
+* Hidden information [Session 17]: we cannot see the rival's hand, so the Tracker
+  replays the public log (dice, builds, trades) to keep a belief about which cards
+  they hold. Development cards we have not seen are treated as equally likely
+  [Session 23].
+* Evaluation [Session 15]: score() adds up our features, each multiplied by its
+  weight, and subtracts the rival's, scaled down so that our own progress counts more
+  than blocking. The weights were chosen by hand and kept or rejected by playing
+  matches; they are not learned.
+* Search over one turn [Session 6]: a turn can be several actions in a row (trade,
+  then build, then buy). plan() is a local beam search: at each step it keeps only the
+  BEAM_WIDTH best positions instead of all of them. Two orders of actions that reach
+  the same position are searched only once, like the "reached" set of [Session 4].
+* Expected utility [Sessions 2 and 23]: when the result of an action is random
+  (buying a development card, stealing with the robber), we average the score over
+  every possible outcome, weighted by its probability.
+* Longest Road: depth-first search with backtracking over our roads [Session 4].
+* Baseline: heuristic_policy() is a simple reflex agent [Session 2], a fixed list of
+  condition-action rules with no search and no learned values.
 
 Layout
-  1. Board       the map: which numbers, resources, ports and neighbors each corner has
+  1. Board       the map: which numbers, resources, ports and neighbours each corner has
   2. State       a copyable position with the rules needed to simulate our own actions
   3. Tracker     replays the public log to estimate which cards the rival holds
   4. Evaluation  scores a position: weighted sum of features
@@ -16,9 +52,9 @@ Layout
   7. Required functions: state_features, action_value, q_update, heuristic_policy
   8. Q-learning policy and the learned table
 
-Words used: "node" = a corner of a tile (where settlements go); "edge" = a side (where roads go);
-"pips" = how many of the 36 two-dice results give a number (6 and 8 have 5 pips, 2 and 12 have 1);
-player 0 = me, player 1 = the rival.
+Words used: "node" = a corner of a tile (where settlements go); "edge" = a side
+(where roads go); "pips" = how many of the 36 two-dice results give a number (6 and 8
+have 5 pips, 2 and 12 have 1); player 0 = us, player 1 = the rival.
 """
 import math
 
@@ -36,7 +72,7 @@ COST_DEV = (0, 0, 1, 1, 1)
 PIPS = {2: 1, 3: 2, 4: 3, 5: 4, 6: 5, 8: 5, 9: 4, 10: 3, 11: 2, 12: 1}
 DEV = ("KNIGHT", "YEAR_OF_PLENTY", "MONOPOLY", "ROAD_BUILDING", "VICTORY_POINT")
 DEV_TOTAL = (14, 2, 2, 2, 5)  # how many of each development card exist in the deck
-# turns at which eta() checks "can I afford it yet?"
+# turns at which eta() checks "can we afford it yet?"
 ETA_STEPS = (0, 1, 2, 3, 4, 5, 6, 8, 10, 13, 16, 20, 25)
 
 
@@ -83,13 +119,17 @@ class Board:
 
 # ---------------------------------------------------------------- 2. state
 def longest_road(board, roads, blocked):
-    """Number of roads in the longest path that never reuses a road.
+    """Number of roads in the longest path that never uses the same road twice.
 
-    `blocked` = corners with a rival building. As in the engine, a path cannot start at, enter or pass one.
+    It is a depth-first search with backtracking [Session 4]: from a starting corner we
+    try every way of extending the path. When a branch ends, we undo the last road so
+    other branches can use it.
+    `blocked` holds the corners with a rival building. As in the engine, a path cannot
+    start at, enter or pass through one of them.
     """
     if not roads:
         return 0
-    graph = {}  # corner -> corners connected to it by my roads
+    graph = {}  # corner -> corners connected to it by our roads
     for a, b in roads:
         graph.setdefault(a, []).append(b)
         graph.setdefault(b, []).append(a)
@@ -105,7 +145,7 @@ def longest_road(board, roads, blocked):
                 walk(nxt, length + 1)
                 used.discard(edge)  # undo, so other branches may use this road
 
-    # A longest path usually starts at a loose end or a fork (a corner without exactly 2 of my roads): try those first.
+    # A longest path usually starts at a loose end or a fork (a corner without exactly 2 of our roads): try those first.
     for n, neighbors in graph.items():
         if len(neighbors) != 2 and n not in blocked:
             walk(n, 0)
@@ -142,8 +182,8 @@ class State:
     """A position that can be copied and changed to try actions.
 
     b: Board. p: [me, rival]. robber: tile index. road_owner / army_owner: who holds the 2-point bonus.
-    dev_left: cards in the deck. played_dev: I already played a card this turn. free_roads: from Road Building.
-    unseen: development cards, by type, that I have not seen (deck or rival's hand).
+    dev_left: cards in the deck. played_dev: we already played a card this turn. free_roads: from Road Building.
+    unseen: development cards, by type, that we have not seen (deck or rival's hand).
     """
     __slots__ = ("b", "p", "robber", "road_owner", "army_owner", "dev_left", "played_dev", "free_roads", "unseen")
 
@@ -281,10 +321,13 @@ class State:
 
 # ---------------------------------------------------------------- 3. tracker
 class Tracker:
-    """Card counting from the public log: dice give resources, every build or trade removes them.
+    """Keep a belief about the rival's hidden cards [Session 17], built from the public log.
 
-    Exact until the rival discards or loses cards we cannot see; after that it is an estimate.
-    Our own hand is not taken from here: the observation gives it.
+    We cannot see the rival's hand, but every card they get or spend is public: dice
+    rolls give resources, and every build or trade removes them. By replaying the log
+    we know their hand exactly, until they discard or lose cards we cannot see. From
+    then on it is an estimate.
+    Our own hand does not come from here: the observation gives it to us.
     """
 
     def __init__(self, board):
@@ -422,6 +465,13 @@ def get_context(obs):
 
 
 def make_state(obs):
+    """Turn the judge's observation into a State we can copy and try actions on.
+
+    Everything about us is known exactly: our cards come from the observation.
+    The rival's hand is hidden, so we use the Tracker's estimate from the public log [Session 17].
+    The same goes for their development cards: we only know how many they hold, so we
+    assume each one is a random card among those we have not seen yet [Session 23]. That
+    gives an expected number of hidden victory points and knights for the rival."""
     board, tracker = get_context(obs)
     s = State()
     s.b = board
@@ -500,16 +550,19 @@ _w = {"me": _vec(W_ME), "opp": _vec(W_ME, -W_OPP_SCALE)}
 
 
 def eta(cost, hand, rate, ratio):
-    """Estimated number of my turns until I can pay `cost`.
+    """Estimate how many of our turns it will take until we can pay `cost`.
 
     cost: cards needed per resource. hand: cards held now. rate: expected cards gained per turn.
     ratio: bank trade rate (how many of a spare resource buy 1 card).
 
-    After t turns I expect hand + rate*t cards. `need` = cards still missing; `spare` = cards the bank would give
-    me for my surplus. I can pay when need - spare <= 0. Only the turns in ETA_STEPS are checked (every turn up to
-    6, then wider gaps, because far estimates need less precision and this runs thousands of times per game).
-    When the gap closes between two checked turns, a straight line between them estimates the exact moment.
-    Returns 30 if still not affordable after 25 turns.
+    Each turn we expect to collect `rate` cards of each resource. So after t turns our
+    hand should be hand + rate * t. Whatever we are still missing can also be covered
+    by trading our surplus with the bank, at `ratio` cards for one.
+    We check this at the turns listed in ETA_STEPS: every turn up to 6, then with wider
+    gaps. Far-off estimates do not need to be precise, and this function runs thousands
+    of times per game. When the cost becomes affordable between two checked turns, we
+    draw a straight line between them to estimate the exact moment.
+    If it is still not affordable after 25 turns, we return 30.
     """
     prev_t, prev_gap = 0, None
     for t in ETA_STEPS:
@@ -576,12 +629,12 @@ DISCARD_P = 0.31
 
 
 def features(s, i):
-    """The FEATURES of player i in position s, as a list in FEATURES order."""
+    """The FEATURES of player i in position s [Session 15], as a list in FEATURES order."""
     b, p = s.b, s.p[i]
     prod = s.production(i)  # with the robber where it is now
     long_run = s.production(i, robber=False)
     mixed = [0.4 * prod[r] + 0.6 * long_run[r] for r in range(5)]  # the robber will not stay forever
-    rate = [x * 2.0 / 36.0 for x in mixed]  # cards per my turn: pips/36 per roll, 2 rolls (mine and the rival's)
+    rate = [x * 2.0 / 36.0 for x in mixed]  # cards per turn of ours: pips/36 per roll, 2 rolls (ours and the rival's)
     ratio = s.ratios(i)
     hand = p.hand
     n_cards = sum(hand)
@@ -658,11 +711,13 @@ def army_progress(s, i):
 
 
 def score(s):
-    """How good position s is for me (higher is better).
+    """How good position s is for us [Session 15]. Higher is better.
 
-    score = sum of weight_k * mine_k  -  0.55 * sum of weight_k * rival_k  +  1.6 * (my army - 0.55 * rival army)
-    weight_k: W_ME of feature k; mine_k / rival_k: feature k of me / the rival (units differ per feature);
-    army: army_progress(), 0..1. The result has no unit; only comparisons between positions matter.
+    We add up our features, each multiplied by its weight in W_ME, and subtract the
+    rival's features scaled down by W_OPP_SCALE. Our own progress counts more than
+    blocking theirs. Progress towards Largest Army is added separately, weighted by
+    ARMY_W. The result has no unit: it is only used to compare positions with each
+    other. A position where we already have 7 points beats everything.
     """
     if s.vp(0) >= 7:  # a winning position beats everything
         return 1000.0 + sum(s.p[0].hand) * 0.01
@@ -687,7 +742,10 @@ MAX_DEPTH = 5   # longest sequence of actions looked at within one turn
 
 
 def apply_action(s, a):
-    """Position after one of OUR actions (same format as observation["actions"]). s is not changed."""
+    """Transition model RESULT(s, a) [Session 3]: the position after one of OUR actions.
+
+    The action uses the same format as observation["actions"]. s is not changed: we
+    work on a copy, so the search can try many actions from the same position."""
     t = s.copy()
     kind = a["type"]
     me = t.p[0]
@@ -756,10 +814,11 @@ def next_actions(s):
 
 
 def buy_value(s):
-    """Average score of buying a development card.
+    """Expected score of buying a development card [Sessions 2 and 23].
 
-    value = sum over card types k of (unseen_k / total unseen) * score(position with one more card of type k)
-    unseen_k: cards of type k that I have not seen (a count).
+    We do not know which card we will get, so we try each type and average the
+    results. Each type is weighted by how likely it is: the cards of that type we have
+    not seen yet, divided by all the cards we have not seen.
     """
     total = sum(s.unseen)
     base = s.copy()
@@ -802,12 +861,22 @@ def state_key(s):  # two action orders that reach the same position are searched
 
 
 def plan(s, actions, deadline=None):
-    """Beam search over my own turn.
+    """Choose the best first action of our turn with a local beam search [Session 6].
 
-    Try each legal action, keep the BEAM_WIDTH best resulting positions, extend them with further actions, and
-    remember which FIRST action led to the best position seen. Only that first action is played; the judge then
-    asks again. Ending the turn now is the value to beat. The rival's reply is not searched.
-    """
+    A turn can be several actions in a row (trade, then build, then buy), and trying
+    every possible sequence would take too long. So, as in local beam search, we keep
+    only the BEAM_WIDTH best positions at each step:
+      1. Try every legal action from the current position.
+      2. Score each resulting position with score() [Session 15].
+      3. Keep the BEAM_WIDTH best ones and extend them with further actions, up to
+         MAX_DEPTH actions.
+    Positions reached by two different orders of actions are only searched once
+    (state_key), which also keeps the beam from filling up with copies of the same
+    position. Ending the turn right now is the value to beat.
+    We remember which FIRST action led to the best position seen, and play only that
+    one. The judge then asks again, and we search again from the new position.
+    The rival's reply is not searched."""
+    
     best_value, best_id = -1e18, None
     seen = set()
     frontier = []
@@ -825,6 +894,8 @@ def plan(s, actions, deadline=None):
         else:
             t = apply_action(s, a)
             value = score(t)
+            # Two action orders that reach the same position are searched once,
+            # like the reached set [Session 4].
             key = state_key(t)
             if key in seen:
                 continue
@@ -871,7 +942,7 @@ def choose_robber(s, actions):  # the robber move whose resulting position score
 
 
 def pre_roll(s, actions):
-    """ROLL, or play a knight first: if it wins, or if the robber blocks me and moving it improves the score."""
+    """ROLL, or play a knight first: if it wins, or if the robber blocks us and moving it improves the score."""
     roll = next(a for a in actions if a["type"] == "ROLL")
     knight = next((a for a in actions if a["type"] == "PLAY_KNIGHT_CARD"), None)
     if knight is None:
@@ -918,7 +989,7 @@ def node_score(s, i, node):
     return value
 
 
-def initial_settlement(s, actions):  # best corner for me, minus a little for what it leaves the rival
+def initial_settlement(s, actions):  # best corner for us, minus a little for what it leaves the rival
     best, best_id = -1e18, actions[0]["id"]
     for a in actions:
         node = a["node"]
@@ -932,7 +1003,7 @@ def initial_settlement(s, actions):  # best corner for me, minus a little for wh
     return best_id
 
 
-def initial_road(s, actions):  # road pointing at the best corners I could settle later
+def initial_road(s, actions):  # road pointing at the best corners we could settle later
     b = s.b
     own = s.p[0].sett | s.p[0].city
     best, best_id = -1e18, actions[0]["id"]
@@ -995,14 +1066,20 @@ LOW_CLOCK_S = 0.8  # below this, stop searching and use the baseline
 
 # ---------------------------------------------------------------- 7. required functions
 def state_features(observation):
-    """The state abstraction used by Q-learning: 9 small values, so the table stays small enough to learn.
+    """Describe the position in 9 small values: the state s of our Q-table [Session 20].
 
-    [phase, my points bucket, race, can road, can settlement, can city, can dev card, open spot, big hand]
+    A Q-table stores one value per (state, action) pair, so a real Catan position, with its
+    board, hands and pieces, would never repeat and nothing could be learned. Instead we keep
+    only what matters for choosing the next type of action, an abstraction as in [Session 3]:
+    [phase, our points bucket, race, can road, can settlement, can city, can dev card,
+     open spot, big hand]
+    With so few possible states, each one is seen often enough during training to learn
+    a reliable value.
     """
     me, opp = observation["me"], observation["opponent"]
     hand = me["resources"]
 
-    def affords(cost):  # 1 if my hand covers this cost, else 0
+    def affords(cost):  # 1 if our hand covers this cost, else 0
         return int(all(hand[RES[r]] >= cost[r] for r in range(5)))
 
     points = me["victory_points"]
@@ -1016,9 +1093,12 @@ def state_features(observation):
 
 
 def action_value(observation, action_id):
-    """Value of one legal action: the LEARNED Q-value of (state, action type).
+    """Value of one legal action: its learned Q-value Q(s, a) from the table [Session 20].
 
-    Actions of the same type share a Q-value, so a very small hand-set estimate breaks the tie.
+    The table is indexed by the action TYPE (build a road, trade...), so all the roads we
+    could build share the same Q-value. To choose between them we add a very small
+    hand-set estimate, which only breaks ties and never overrides the learned value.
+    A (state, action) pair that never appeared in training counts as 0.
     """
     # find the action by its id; do not assume that the id equals the list position
     action = next(a for a in observation["actions"] if a["id"] == action_id)
@@ -1066,19 +1146,26 @@ def road_building_value(s):
 
 
 def q_update(q, reward, best_next_q, alpha, gamma):
-    """One Q-learning step: new_q = q + alpha * (reward + gamma * best_next_q - q).
+    """One Q-learning update, the temporal-difference rule of [Session 20]:
 
-    q: old value of (state, action). reward: points received after the action. best_next_q: highest value
-    available in the next state (0 at the end of the game). alpha: learning rate 0..1. gamma: discount 0..1.
+        new_q = q + alpha * (reward + gamma * best_next_q - q)
+
+    The target, reward + gamma * best_next_q, is what this action seems to be worth now:
+    the points it just earned plus the discounted value of the best action in the next
+    state. We move the old estimate q a fraction alpha of the way towards that target.
+    q: old value of (state, action). reward: points received after the action.
+    best_next_q: highest Q-value in the next state, 0 when the game has ended.
+    alpha: learning rate, 0..1. gamma: discount for later rewards, 0..1.
     """
     return q + alpha * (reward + gamma * best_next_q - q)
 
 
 def heuristic_policy(observation):
-    """Baseline: a fixed priority list guided by production counts. No search, no learned values.
+    """Baseline: a simple reflex agent [Session 2] with fixed condition-action rules.
 
-    Settlement, then city, road (only if there is nowhere to settle), cards, a trade that makes something
-    affordable, otherwise end the turn.
+    No search and no learned values. It tries, in this order: build a settlement,
+    then a city, then a road (only if there is nowhere to settle), then buy a card,
+    then a trade that makes something affordable. Otherwise it ends the turn.
     """
     s = make_state(observation)
     actions = observation["actions"]
@@ -1091,7 +1178,7 @@ def heuristic_policy(observation):
     if observation["phase"] == "initial_placement":
         return initial_road(s, actions)
     if "MOVE_ROBBER" in by:
-        def harm(a):  # rival pips blocked, minus 3 times my own
+        def harm(a):  # rival pips blocked, minus 3 times our own
             t = b.tile_id[tuple(a["tile"])]
             total = 0
             for n in b.tile_nodes[t]:
@@ -1159,13 +1246,20 @@ def best_of_type(observation, kind):
         return best_road(make_state(observation), options)
     if kind == "MARITIME_TRADE":
         hand = observation["me"]["resources"]
-        # give what I have most of, receive what I have least of
+        # give what we have most of, receive what we have least of
         return max(options, key=lambda a: hand[a["give"]] - a["give_count"] - hand[a["receive"]])["id"]
     return heuristic_policy(dict(observation, actions=options))  # the baseline, restricted to this type
 
 
 def q_policy(observation, table=None):
-    """Greedy policy over the learned table. Falls back to the baseline where nothing was learned."""
+    """Play with the learned Q-table, always picking the best-valued action type [Session 20].
+
+    During training (train_q_catan.py) the agent explored with epsilon-greedy, with epsilon
+    shrinking over the games [Session 21]. Here we only exploit: as the course recommends
+    for evaluation, epsilon = 0 and we take the action type with the highest Q-value.
+    The table only chooses the TYPE of action; best_of_type() picks the concrete one.
+    Where the table has no value for the current state, we fall back to heuristic_policy().
+    """
     table = Q if table is None else table
     baseline_id = heuristic_policy(observation)
     baseline_kind = next(a["type"] for a in observation["actions"] if a["id"] == baseline_id)
