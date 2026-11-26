@@ -33,7 +33,7 @@ PLANNED_GAMES = 40000     # exploration shrinks linearly over this many games, t
 MIN_VISITS = 30           # entries seen fewer times are not exported: too noisy to trust
 CHECKPOINT = "q_checkpoint.json"
 HERE = os.path.dirname(os.path.abspath(__file__))
-AGENT_PATH = os.path.join(HERE, "catan_agent.py")
+AGENT_PATH = os.path.join(os.path.dirname(HERE), "Team_10", "catan_agent.py")
 
 
 def load_agent():
