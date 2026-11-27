@@ -1,4 +1,35 @@
-# Team 10
+# Team 10: AI Agent Tournament
+
+Four agents for the IE University *AI: Reasoning & Problem Solving* tournament: **European Road Trip**, **Chess**, **Battleship** and **Catan**. Each agent is a single Python file with the functions the judge expects (`act`, plus the required helper functions of each game).
+
+## Contents
+
+- [Repository layout](#repository-layout)
+- [Members](#members)
+- [Algorithms implemented](#algorithms-implemented)
+- [Training](#training)
+- [Tests](#tests)
+- [Dependencies and known limitations](#dependencies-and-known-limitations)
+- [Technical explanation](#technical-explanation) (Road Trip, Chess, Battleship, Catan)
+- [Use of generative AI](#use-of-generative-ai)
+
+## Repository layout
+
+```
+Team_10/
+  roadtrip_agent.py     European Road Trip agent
+  chess_agent.py        Chess agent (alpha-beta search)
+  battleship_agent.py   Battleship agent (belief-state filter + CSP)
+  catan_agent.py        Catan agent (beam search; Q-table kept for comparison)
+  requirements.txt      python-chess 1.11.2, numpy
+  README.md             this file
+training/
+  train_q_catan.py      Q-learning training / evaluation script for Catan
+```
+
+Only the four agent files and `README.md` go into the submitted `Team_10.zip`. The training script is kept in the repository for reproducibility but is not part of the submission.
+
+Learned values (the Catan Q-table) are stored inside `catan_agent.py`, so each agent file is self-contained.
 
 ## Members
 
@@ -13,15 +44,19 @@
 | Challenge | Algorithms | Where in the file |
 |---|---|---|
 | Road Trip | Dijkstra/UCS, A* (Haversine), iterated local search (2-opt + Or-opt + double-bridge), conflict-repairing decoder with negotiated-congestion routing, cheapest insertion on the real graph, restarts | `roadtrip_agent.py`: `ucs`, `astar`, `_best_first`, `local_search`, `_ils`, `_two_opt_or_opt`, `RoadTripSolver` (`decode`, `_negotiate`, `insertion`, `descend`, `run`) |
-| Chess | TODO | `chess_agent.py`: TODO |
+| Chess | Minimax and alpha-beta (required functions), alpha-beta with iterative deepening, transposition table (Zobrist hashing), MVV-LVA move ordering, quiescence search, hand-weighted evaluation (material + piece-square tables), time management per move | `chess_agent.py`: `evaluate`, `minimax`, `alphabeta`, `static_evaluation`, `search`, `search_root`, `quiescence`, `order_moves`, `time_budget`, `choose_move`, `act` |
 | Battleship | Belief-state filter (predict + filter) for moving ships, Bayes' rule for sonar and for the rival's move rate, CSP with backtracking + forward checking in target mode, CSP over SUNK events, value-of-information sonar rule | `battleship_agent.py`: `ShipBelief`, `Tracker` (`advance_to`, `apply_shot`, `apply_sonar`, `log_weight`, `attributions`, `_target_weights`), `predict_ship_belief`, `sonar_posterior`, `consistent_placements`, `_hunt_shot`, `_decide` |
-| Catan | TODO | `catan_agent.py`: TODO |
+| Catan | Beam search over the actions of a turn with a hand-weighted position score (plays), tabular Q-learning (trained offline, compared but not used), priority-list baseline, inference of the rival's hand from public events | `catan_agent.py`: `act`, `plan`, `score`, `next_actions`, `apply_action`, `heuristic_policy`, `q_policy`, `q_update`, `state_features` |
 
 ## Training
 
 Road Trip: no learned parameters; everything is computed during the 5 seconds.
 
-TODO (Catan, and any other agent with learned values): method, number of games, how long it ran. Learned values are stored inside the `.py` file.
+Chess: no learned parameters. The evaluation weights and piece-square tables are hand-set (the tables come from Michniewski's Simplified Evaluation Function).
+
+Catan: tabular Q-learning, 80,000 self-play games against the baseline, about 20 minutes on a 2-core machine; the table is stored inside `catan_agent.py`. The agent that actually plays uses search, not the table. Full details and commands are in the Catan technical explanation below.
+
+Battleship: no learned parameters; the rival's move rate is inferred during the game with Bayes' rule.
 
 ## Tests
 
@@ -37,19 +72,47 @@ PASS  Road Trip  Local search / optimization        tour improved from 16810 to 
 
 With the official judge (`run_game`), our agent beat `demo` and `demo_b` on the training instance and on random draws, every time, with 0 invalid submissions. Offline, we ran it on 301 instances made by the judge's own generator (the training set plus seeds 0 to 299). The clock was cut to **1.5 s** to imitate a Colab core about three times slower than our laptops, and in a stress test to **0.6 s**. Results are under "Baseline against improved version" below.
 
-**Chess.** TODO: rivals, number of games, results.
+**Chess.** `check_requirements`: 3/3 Chess checks pass (see the whole-team output below). With the official judge (`run_game`, real 5 s clock), the agent won 20 of 20 games against `demo` and 20 of 20 against `demo_b`, seeds 1 to 20, with no incidents. Offline, over 20 games (10 openings of 4 random plies, colours swapped) against a plain fixed-depth-2 alpha-beta baseline on the same evaluation, it won 18, drew 2 and lost 0.
 
 **Battleship.** `check_requirements` (confirmed in Colab): 3/3 battleship requirements pass, and `consistent_placements` matched the judge's exact answer on 3,000 random cases. With the tournament engine, 200 to 300 games per pairing: the final version wins 92% against `demo_a`, 300–0 against `demo_b`, 94% against a rival that moves a ship every turn, and 251–49 against our v0 baseline. In Colab with the real judge, 20 games against `demo_a` and `demo_b` were all won with no incidents. Details under "Baseline against improved version" below.
 
-**Catan.** TODO: rivals, number of games, results.
+**Catan.** `check_requirements`: 4/4 Catan checks pass. In the course judge, 52 wins in 60 games against `demo` and 20 in 20 against `demo_b`. With our own simulator, the search agent wins 71.0% ± 2.8 of 1,000 games against the baseline policy. See "Baseline against improved versions" in the Catan section.
 
-**Whole team.** TODO: paste the output of `check_requirements("Team_XX.zip")` (14/14) and the result of a full match against `demo_a` in Colab.
+**Whole team.** `check_requirements("Team_10.zip")` with the course judge, confirmed in Google Colab (Python 3.13.18 on Linux, chess 1.11.2, catanatron 3.2.1) and also run locally on a Mac:
+
+```
+PASS  Road Trip   Uniform-cost search / Dijkstra          optimal on 8 city pairs, 384 nodes expanded
+PASS  Road Trip   A* with a geographic heuristic          optimal on 8 city pairs, 176 nodes expanded
+PASS  Road Trip   A* expands no more nodes than UCS       A* 176 vs UCS 384
+PASS  Road Trip   Local search / optimization             tour improved from 16810 to 7480
+PASS  Chess       Heuristic evaluation function           ranks material correctly from White's point of view
+PASS  Chess       Minimax with alpha-beta pruning         same value as minimax with fewer nodes on 4 positions
+PASS  Chess       Depth-limited search                    depth 1 visits 32 nodes, depth 2 visits 127
+PASS  Battleship  Constraints over hidden ship positions  all placements found on 4 constraint sets
+PASS  Battleship  Bayesian update from noisy sonar        Bayes update exact on 3 cases
+PASS  Battleship  Transition model / belief prediction    belief correctly propagated through the transition model
+PASS  Catan       State abstraction                       6 distinct abstract states from 6 observations
+PASS  Catan       Value estimate for actions              a finite value for every legal action tested
+PASS  Catan       Q-learning update                       matches the Q-learning update rule
+PASS  Catan       Baseline heuristic policy               always returns a legal action
+14/14 requirements pass.
+```
+
+Full matches against `demo_a` with the real limits, run locally (`run_match`, seeds 1, 2 and 3): Team_10 won all three 4 to 0, with no tiebreaks. Seed 1: Road Trip 14,100 km against 17,167 km, Chess 2-0, Battleship 17 hits against 12, Catan 8 VP against 5. Seed 2: 11,018 km against 13,516 km, Chess 2-0, Battleship 17 hits against 15, Catan 7 VP against 2.
+
+In Colab, `Team_10.zip` also played a full match against `demo_a` with the real limits (seed 18005630, 12.8 s). Team_10 won all four games and the match 4 to 0, with no incidents reported: Road Trip 11,808 km against 14,790 km, Chess 2-0 (checkmate in both games), Battleship 17 hits and 5 sunk against 7 hits and 1 sunk, Catan 7 VP against 3 VP.
 
 ## Dependencies and known limitations
 
 Road Trip uses only the Python standard library (`heapq`, `math`, `random`, `time`). Battleship uses `numpy` and `random`. Their limits are described in their technical explanations below.
 
-TODO: libraries and known weaknesses of Chess and Catan.
+Chess uses `python-chess` (pinned to 1.11.2 in `requirements.txt`) for the board, legal moves and rules. Catan uses only the standard library; its training script also needs the course folder and its `catanatron` package. Catan was tested on Linux with Python 3.13 and in Google Colab (`check_requirements` 4/4 Catan checks, and a full match against `demo_a`). Install with:
+
+```
+pip install -r Team_10/requirements.txt
+```
+
+Known weaknesses of Chess and Catan are listed under "Limits" in their sections.
 
 ## Technical explanation
 
@@ -108,19 +171,49 @@ Test: 301 judge-generated instances, 1.5 s per instance, every route validated w
 ### Chess
 
 #### Problem formulation
-TODO
+Chess is a two-player, deterministic, perfect-information, zero-sum game. The judge gives the agent the position (FEN), the move history, the legal moves and the remaining clock; the agent returns one legal move in UCI. Scores are in centipawns (100 = one pawn) and always from White's point of view: White is MAX, Black is MIN, as in the MAX/MIN trees of Session 14.
 
 #### Algorithms
-TODO
+1. **Evaluation** (`static_evaluation`, Session 15): a weighted sum of features. Material (pawn 100, knight 320, bishop 330, rook 500, queen 900) plus piece-square tables for position (centre control, king safety, with a separate king table for the endgame, detected by `is_endgame`). Checkmate scores `MATE - ply`, so faster mates are preferred.
+2. **Minimax and alpha-beta** (`minimax`, `alphabeta`): the plain required functions, with depth cutoff.
+3. **Playing search** (`search`, `search_root`), alpha-beta plus four additions:
+   - **Move ordering** (MVV-LVA, `order_moves`): captures of valuable pieces by cheap ones first, and the transposition-table move first. Better ordering gives more cut-offs.
+   - **Iterative deepening** (`choose_move`): depth 1, 2, 3, ... until the time is used; the best move of the deepest complete search is played. The previous best move is searched first at the next depth.
+   - **Transposition table** (`SearchState.table`, keyed by the Zobrist hash): stores depth, value, bound type (exact, lower, upper) and best move. Cleared above 300,000 entries. Mate scores and positions with repetition risk are used only for move ordering, not for returning scores.
+   - **Quiescence search** (`quiescence`): at depth 0 it keeps following captures, which fixes the horizon effect. Captures that clearly lose material are skipped (`is_losing_capture`).
+   **Why pruning keeps the value.** Alpha is the best score MAX can already guarantee elsewhere, and beta the best MIN can guarantee. When alpha ≥ beta at a node, the player one level up already has a better option, so it will never choose this branch and the remaining moves cannot change the value at the root. Pruning only skips moves that cannot matter, so `alphabeta` returns the same value as `minimax` while visiting fewer nodes.
+
+   **How the depth is chosen.** It is not fixed. Iterative deepening raises the depth one level at a time. A new depth is started only if less than half of the move's time target has been used, because each level takes several times longer than the last. The search also stops early when a forced mate is found.
+4. **Draw handling** (`rule_draw_score`): repetition and the fifty-move rule are scored as draws using the real game history (`rebuild_board`), and `fallback_move` avoids stalemating the rival when ahead.
 
 #### Baseline against improved version
-TODO
+**Baseline:** plain `alphabeta` at a fixed depth of 2 on the same evaluation function: no move ordering, iterative deepening, transposition table or quiescence, and no clock management. **Improved:** the playing search described above.
+
+- **Pruning.** At depth 3, on 4 positions (start, an open game, a tactical middlegame and a king-and-pawn endgame), `minimax` visits 137,233 nodes and `alphabeta` visits 5,671, with the same value on every position.
+- **Strength.** Over 20 games against the baseline (10 openings of 4 random plies, colours swapped, 5 s clock for the agent): 18 wins, 2 draws, 0 losses.
+- **Course judge.** 20 wins in 20 games against `demo` and 20 in 20 against `demo_b`.
+
+**Removing one feature at a time.** Each variant is the real agent with one feature switched off, playing the full agent: 16 games each (8 openings of 4 random plies, colours swapped, 5 s clock per game for each side, same machine).
+
+| Variant | Variant wins | Draws | Full agent wins |
+|---|---|---|---|
+| No move ordering (moves in generation order) | 1 | 3 | 12 |
+| No quiescence search (static evaluation at the cutoff) | 0 | 3 | 13 |
+| No iterative deepening (fixed depth 4, no clock check) | 0 | 0 | 16 |
+| No transposition table | 2 | 7 | 7 |
+
+- Move ordering, quiescence and iterative deepening each matter: the full agent wins most games without them. The fixed-depth variant has no clock management, so we expect most of its 16 losses to be lost clocks, not weaker moves. We did not separate the two causes.
+- The transposition table gives only a small gain: 7 wins to 2 in 16 games, which is too few games to be sure it helps.
+- At the start position, the full agent reaches depth 3 to 5 in its per-move time. Without move ordering it reached depth 4, 4, 0 and 4 on the same four test positions, so on the tactical position it finished no complete search.
+- The sample is small (16 games per variant), and both sides run on the same machine, so treat these as a rough ranking, not exact strengths.
 
 #### Time and memory
-TODO
+`time_budget` spreads the usable clock (remaining minus a 0.5 s reserve) over the expected remaining moves, and never spends more than 15% of what is left on one move. `check_clock` raises `OutOfTime` from inside the search (checked every 64 nodes), so the agent stops promptly and plays the best move of the deepest complete search, or the partial result of the current depth when that is safe. Below 0.25 s remaining it answers immediately from move ordering. If there is only one legal move it plays it without searching. Any exception falls back to a legal move, so a bug cannot forfeit by an invalid answer. Memory is dominated by the transposition table (capped at 300,000 entries, far under the 2 GB limit).
 
 #### Limits
-TODO
+- The evaluation is simple: material and piece-square tables only. It has no mobility, pawn-structure or king-safety terms beyond the tables, and the table values are not tuned by us.
+- No null-move pruning, late-move reductions, killer or history heuristics, or opening book.
+- Single-threaded, and Python limits the depth reached per move.
 
 ### Battleship
 
@@ -215,30 +308,6 @@ With more time we would:
 ### Catan
 
 #### Problem formulation
-TODO
-
-#### Algorithms
-TODO
-
-#### Baseline against improved version
-TODO
-
-#### Time and memory
-TODO
-
-#### Limits
-TODO
-
-## Use of generative AI
-
-Road Trip: we used Claude (Anthropic) to help design, implement and benchmark the agent and to draft this section. We reviewed the code and can explain every algorithm in it.
-
-Battleship: We used Claude (Anthropic) as a coding assistant for the Battleship agent. It helped design the belief-state filter, the CSP target mode and the Bayesian sonar update, write and debug the code, and run the comparison between versions. Every algorithm is based on material from the course sessions, and we reviewed and tested all of it ourselves in Colab with the official judge. We understand and can explain every part of the agent.
-
-TODO: the other two agents.
-## Catan
-
-### Problem formulation
 Two players, first to 7 victory points (VP). Dice and development cards are random, the rival's cards are hidden, and each agent has 5 s of decision time per game. The agent sees the board, its own cards, public information and the log, and it returns the id of one legal action. Goal: win.
 
 The file has three policies:
@@ -251,7 +320,7 @@ The file has three policies:
 
 `act` does **not** use the Q-table, because the learned policy is measurably much weaker (see the comparison).
 
-### Markov decision process and reinforcement learning
+#### Markov decision process and reinforcement learning
 A Markov decision process (MDP) is a model with states, actions, transitions and rewards. Ours is deliberately simplified.
 
 **State** (`state_features`), 9 values:
@@ -287,7 +356,7 @@ Worked example (illustrative numbers): `Q = 3.30`, `r = 1`, `best_next = 3.10`, 
 
 `action_value(observation, action_id)` returns the learned Q-value of the action's type (0 if never learned), plus 0.001 times a hand-written estimate to order actions of the same type. It is not a win probability.
 
-### How we trained
+#### How we trained
 - Opponent: `heuristic_policy`. The learner alternates seats.
 - Exploration (epsilon-greedy: with probability epsilon, try a random action type): epsilon falls from 0.40 to 0.05 over the first 40,000 games, then stays at 0.05.
 - 80,000 games in short batches with a saved checkpoint, about 20 minutes of computing on a 2-core Linux machine.
@@ -297,11 +366,11 @@ Worked example (illustrative numbers): `Q = 3.30`, `r = 1`, `best_next = 3.10`, 
 To reproduce (`ai_agent_tournament` is the extracted course folder; `q_checkpoint.json` must not exist at the start):
 
 ```
-python train_q_catan.py train  --root ai_agent_tournament --games 20000   # repeat until the total is 80000
-python train_q_catan.py export --root ai_agent_tournament
+python training/train_q_catan.py train  --root ai_agent_tournament --games 20000   # repeat until the total is 80000
+python training/train_q_catan.py export --root ai_agent_tournament
 ```
 
-### What we learned
+#### What we learned
 | Training games | Q-learning against baseline (2,000 games, same boards) |
 |---|---|
 | 40,000 | 46.7% ± 1.7 |
@@ -314,7 +383,7 @@ We chose the 80,000-game table from this result, so we checked it on new boards:
 - Our explanation (not proven): the state is too coarse, so positions needing different moves look the same; only the action type is learned; and dice noise is large compared with the difference between actions.
 - More training helped from 40,000 to 80,000 games. We did not test beyond that.
 
-### The search agent
+#### The search agent
 **Value of a position** (`score`):
 
 `V = sum_k(w_k * mine_k) - 0.55 * sum_k(w_k * rival_k) + 1.6 * (A_mine - 0.55 * A_rival)`
@@ -329,7 +398,7 @@ We chose the 80,000-game table from this result, so we checked it on new boards:
 
 **Search** (`plan`): a beam search over my own turn. It keeps the 6 best partial sequences, up to 5 actions deep, and plays the first action of the best one. A drawn card is averaged over the cards not yet seen. Dice and the rival's reply are not searched.
 
-### Planning: preconditions and effects
+#### Planning: preconditions and effects
 | Action | Preconditions | Effects |
 |---|---|---|
 | Road | 1 wood, 1 brick (or free); fewer than 15; empty edge connected to my network | Road added; Longest Road rechecked |
@@ -343,12 +412,12 @@ We chose the 80,000-game table from this result, so we checked it on new boards:
 
 `next_actions` checks the preconditions and `apply_action` applies the effects.
 
-### What can be deduced from public events
+#### What can be deduced from public events
 - Payouts, building costs, trades, Year of Plenty, Monopoly and cards stolen between the two players are all known to me.
 - So the rival's hand is exact until some of its cards are discarded at random. After that it is an estimate, rescaled to the public card count. The bank running out of a resource is not modeled.
 - Unseen development cards = deck composition minus my cards and all played cards.
 
-### Baseline against improved versions
+#### Baseline against improved versions
 Each board is played twice with seats swapped. Boards differ from those used in training. ± is the half-width of the 95% confidence interval.
 
 | Match | Games | Win rate of the first |
@@ -360,16 +429,16 @@ Each board is played twice with seats swapped. Boards differ from those used in 
 | Baseline vs random moves | 1,000 | 99.7% ± 0.3 |
 
 ```
-python train_q_catan.py evaluate --root ai_agent_tournament --games 4000 --seed0 900000 --pair qlearning baseline
-python train_q_catan.py evaluate --root ai_agent_tournament --games 1000 --pair search baseline
-python train_q_catan.py evaluate --root ai_agent_tournament --games 1000 --pair search qlearning
-python train_q_catan.py evaluate --root ai_agent_tournament --games 1000 --pair qlearning random
-python train_q_catan.py evaluate --root ai_agent_tournament --games 1000 --pair baseline random
+python training/train_q_catan.py evaluate --root ai_agent_tournament --games 4000 --seed0 900000 --pair qlearning baseline
+python training/train_q_catan.py evaluate --root ai_agent_tournament --games 1000 --pair search baseline
+python training/train_q_catan.py evaluate --root ai_agent_tournament --games 1000 --pair search qlearning
+python training/train_q_catan.py evaluate --root ai_agent_tournament --games 1000 --pair qlearning random
+python training/train_q_catan.py evaluate --root ai_agent_tournament --games 1000 --pair baseline random
 ```
 
 **Course judge** (`run_game`, real clocks, match seeds 3000 onward): 52 wins in 60 games against `demo`, 20 in 20 against `demo_b`, no incidents. `check_requirements`: 4 of 4 Catan checks pass.
 
-### How the search weights were chosen
+#### How the search weights were chosen
 The weights were set by hand, **not learned**. Changes were kept only if they won matches. These development matches used scripts and earlier versions that are not part of this submission, so the course folder alone cannot reproduce them.
 
 | Change | Games | Win rate against previous best | Decision |
@@ -380,18 +449,22 @@ The weights were set by hand, **not learned**. Changes were kept only if they wo
 | Same, weight 0.7 | 1,000 | 53.6% ± 1.8 | Not chosen (no clear difference from 1.6) |
 | Three changes to the opening placement | 1,000 to 2,000 | 48.7% to 49.2% | Rejected |
 
-### Time and memory
+#### Time and memory
 The search uses about 0.1 s of computation per game; in the judge games above at least 4.73 s of the 5 s remained. Below 0.8 s remaining, or after an internal error, `act` falls back to the baseline. Peak memory of a test process running the agent: about 36 MB.
 
-### Limits
+#### Limits
 - No search over dice or the rival's reply.
 - A knight is not considered in the middle of a planned turn, and there is no dedicated search for a winning sequence.
 - Weights are hand-set, and no strong independent opponent was available.
 - Q-learning is far weaker than the search. Next steps would be learning from numeric features (function approximation) instead of a small table, and training against stronger opponents.
 - One engine behavior: cutting a rival's road can award Longest Road with fewer than 5 roads. The agent avoids giving those points away and does not try to obtain them.
 
-### Dependencies
-The agent uses only the Python standard library. The training script also needs the course folder (and its `catanatron` package). Tested on Linux with Python 3.13, not on Google Colab.
+## Use of generative AI
 
-### Use of generative AI
-Claude (Anthropic) designed, wrote, trained, tested and documented this agent and the training script, following the team's instructions. Before submitting, the team must describe here what it reviewed or changed itself, confirm that this complies with the course AI policy, and be able to explain every algorithm.
+Road Trip: we used Claude (Anthropic) to help design, implement and benchmark the agent and to draft this section. We reviewed the code and can explain every algorithm in it.
+
+Battleship: We used Claude (Anthropic) as a coding assistant for the Battleship agent. It helped design the belief-state filter, the CSP target mode and the Bayesian sonar update, write and debug the code, and run the comparison between versions. Every algorithm is based on material from the course sessions, and we reviewed and tested all of it ourselves in Colab with the official judge. We understand and can explain every part of the agent.
+
+Chess: Claude (Anthropic) worked as our coding assistant on the Chess agent. It helped us design the evaluation function, the alpha-beta search with its extensions (move ordering, iterative deepening, transposition table and quiescence search) and the time management, and it helped write and debug the code and run the comparisons against the baseline. The algorithms come from the course sessions on adversarial search and evaluation functions. We reviewed the code, tested it with the official judge, and can explain every part of the agent.
+
+Catan: Claude (Anthropic) also helped us with the Catan agent, as a coding assistant. It helped us design the search agent and its position score, the Q-learning setup (state, actions and rewards), and the inference of the rival's hand from public events. It also helped write and debug the agent and the training script, run the training, and compare the baseline, Q-learning and search policies. The methods are based on the course sessions on planning and reinforcement learning. We reviewed and tested the result ourselves with the official judge, and we can explain every part of the agent.
